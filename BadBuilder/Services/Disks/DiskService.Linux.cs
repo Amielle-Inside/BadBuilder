@@ -18,7 +18,8 @@ internal static partial class DiskService
 
         try
         {
-            string output = RunProcess("/usr/bin/lsblk", "-J -o NAME,SIZE,TYPE,TRAN,MODEL,VENDOR,MOUNTPOINT,RM");
+            string lsblkPath = FindTool("lsblk", "/usr/bin/lsblk", "/bin/lsblk");
+            string output = RunProcess(lsblkPath, "-J -o NAME,SIZE,TYPE,TRAN,MODEL,VENDOR,MOUNTPOINT,RM");
             using JsonDocument doc = JsonDocument.Parse(output);
             
             foreach (JsonElement blockDevice in doc.RootElement.GetProperty("blockdevices").EnumerateArray())
@@ -103,8 +104,9 @@ internal static partial class DiskService
         string devicePath = disk.DevicePath;
         
         // Wipe existing partition table and create new MBR with FAT32 partition
-        RunProcess("/usr/sbin/sgdisk", $"--zap-all {devicePath}");
-        RunProcess("/usr/sbin/sgdisk", $"-n 1:0:0 -t 1:0700 -c 1:BADUPDATE {devicePath}");
+        string sgdiskPath = FindTool("sgdisk", "/usr/sbin/sgdisk", "/usr/bin/sgdisk", "/bin/sgdisk");
+        RunProcess(sgdiskPath, $"--zap-all {devicePath}");
+        RunProcess(sgdiskPath, $"-n 1:0:0 -t 1:0700 -c 1:BADUPDATE {devicePath}");
         
         // Wait for kernel to register new partition
         Thread.Sleep(1000);
@@ -117,10 +119,12 @@ internal static partial class DiskService
         }
 
         // Format as FAT32
-        RunProcess("/usr/sbin/mkfs.fat", $"-F 32 -n BADUPDATE {partitionPath}");
+        string mkfsFatPath = FindTool("mkfs.fat", "/usr/sbin/mkfs.fat", "/usr/bin/mkfs.fat", "/bin/mkfs.fat");
+        RunProcess(mkfsFatPath, $"-F 32 -n BADUPDATE {partitionPath}");
         
         // Sync
-        RunProcess("/usr/bin/sync", "");
+        string syncPath = FindTool("sync", "/usr/bin/sync", "/bin/sync");
+        RunProcess(syncPath, "");
         
         return partitionPath;
     }
@@ -136,12 +140,15 @@ internal static partial class DiskService
             throw new IOException($"Formatted partition not found at {partitionPath} or {disk.DevicePath}p1");
 
         // Trigger udev to assign mount point
-        RunProcess("/usr/sbin/udevadm", "settle");
-        RunProcess("/usr/sbin/partprobe", disk.DevicePath);
+        string udevadmPath = FindTool("udevadm", "/usr/sbin/udevadm", "/usr/bin/udevadm", "/bin/udevadm");
+        string partprobePath = FindTool("partprobe", "/usr/sbin/partprobe", "/usr/bin/partprobe", "/bin/partprobe");
+        RunProcess(udevadmPath, "settle");
+        RunProcess(partprobePath, disk.DevicePath);
         Thread.Sleep(500);
 
         // Find mount point
-        string output = RunProcess("/usr/bin/lsblk", $"-J -o NAME,MOUNTPOINT {disk.DevicePath}");
+        string lsblkPath = FindTool("lsblk", "/usr/bin/lsblk", "/bin/lsblk");
+        string output = RunProcess(lsblkPath, $"-J -o NAME,MOUNTPOINT {disk.DevicePath}");
         using JsonDocument doc = JsonDocument.Parse(output);
         
         foreach (JsonElement blockDevice in doc.RootElement.GetProperty("blockdevices").EnumerateArray())
@@ -166,7 +173,8 @@ internal static partial class DiskService
         
         try
         {
-            RunProcess("mount", $"{partitionPath} {manualMountPoint}");
+            string mountPath = FindTool("mount", "/usr/bin/mount", "/bin/mount");
+            RunProcess(mountPath, $"{partitionPath} {manualMountPoint}");
             return manualMountPoint + "/";
         }
         catch
@@ -179,7 +187,8 @@ internal static partial class DiskService
     {
         try
         {
-            string output = RunProcess("/usr/bin/lsblk", $"-J -o NAME,MOUNTPOINT {devicePath}");
+            string lsblkPath = FindTool("lsblk", "/usr/bin/lsblk", "/bin/lsblk");
+            string output = RunProcess(lsblkPath, $"-J -o NAME,MOUNTPOINT {devicePath}");
             using JsonDocument doc = JsonDocument.Parse(output);
             
             foreach (JsonElement blockDevice in doc.RootElement.GetProperty("blockdevices").EnumerateArray())
@@ -193,7 +202,8 @@ internal static partial class DiskService
                             string mountPoint = mp.GetString() ?? "";
                             if (!string.IsNullOrEmpty(mountPoint))
                             {
-                                try { RunProcess("/usr/bin/umount", mountPoint); } catch { }
+                                string umountPath = FindTool("umount", "/usr/bin/umount", "/bin/umount");
+                                try { RunProcess(umountPath, mountPoint); } catch { }
                             }
                         }
                     }
@@ -201,5 +211,29 @@ internal static partial class DiskService
             }
         }
         catch { }
+    }
+
+    private static string FindTool(string toolName, params string[] paths)
+    {
+        foreach (string path in paths)
+        {
+            if (File.Exists(path))
+                return path;
+        }
+        
+        // Fallback to PATH lookup
+        string? pathEnv = Environment.GetEnvironmentVariable("PATH");
+        if (!string.IsNullOrEmpty(pathEnv))
+        {
+            foreach (string dir in pathEnv.Split(':'))
+            {
+                string fullPath = Path.Combine(dir, toolName);
+                if (File.Exists(fullPath))
+                    return fullPath;
+            }
+        }
+        
+        // Last resort: return first path and let the error happen naturally
+        return paths[0];
     }
 }
