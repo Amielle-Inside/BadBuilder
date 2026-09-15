@@ -18,7 +18,7 @@ internal static partial class DiskService
 
         try
         {
-            string output = RunProcess("lsblk", "-J -o NAME,SIZE,TYPE,TRAN,MODEL,VENDOR,MOUNTPOINT,RM");
+            string output = RunProcess("/usr/bin/lsblk", "-J -o NAME,SIZE,TYPE,TRAN,MODEL,VENDOR,MOUNTPOINT,RM");
             using JsonDocument doc = JsonDocument.Parse(output);
             
             foreach (JsonElement blockDevice in doc.RootElement.GetProperty("blockdevices").EnumerateArray())
@@ -103,8 +103,8 @@ internal static partial class DiskService
         string devicePath = disk.DevicePath;
         
         // Wipe existing partition table and create new MBR with FAT32 partition
-        RunProcess("sgdisk", $"--zap-all {devicePath}");
-        RunProcess("sgdisk", $"-n 1:0:0 -t 1:0700 -c 1:BADUPDATE {devicePath}");
+        RunProcess("/usr/sbin/sgdisk", $"--zap-all {devicePath}");
+        RunProcess("/usr/sbin/sgdisk", $"-n 1:0:0 -t 1:0700 -c 1:BADUPDATE {devicePath}");
         
         // Wait for kernel to register new partition
         Thread.Sleep(1000);
@@ -117,10 +117,10 @@ internal static partial class DiskService
         }
 
         // Format as FAT32
-        RunProcess("mkfs.fat", $"-F 32 -n BADUPDATE {partitionPath}");
+        RunProcess("/usr/sbin/mkfs.fat", $"-F 32 -n BADUPDATE {partitionPath}");
         
         // Sync
-        RunProcess("sync", "");
+        RunProcess("/usr/bin/sync", "");
         
         return partitionPath;
     }
@@ -136,12 +136,12 @@ internal static partial class DiskService
             throw new IOException($"Formatted partition not found at {partitionPath} or {disk.DevicePath}p1");
 
         // Trigger udev to assign mount point
-        RunProcess("udevadm", "settle");
-        RunProcess("partprobe", disk.DevicePath);
+        RunProcess("/usr/sbin/udevadm", "settle");
+        RunProcess("/usr/sbin/partprobe", disk.DevicePath);
         Thread.Sleep(500);
 
         // Find mount point
-        string output = RunProcess("lsblk", $"-J -o NAME,MOUNTPOINT {disk.DevicePath}");
+        string output = RunProcess("/usr/bin/lsblk", $"-J -o NAME,MOUNTPOINT {disk.DevicePath}");
         using JsonDocument doc = JsonDocument.Parse(output);
         
         foreach (JsonElement blockDevice in doc.RootElement.GetProperty("blockdevices").EnumerateArray())
@@ -179,7 +179,7 @@ internal static partial class DiskService
     {
         try
         {
-            string output = RunProcess("lsblk", $"-J -o NAME,MOUNTPOINT {devicePath}");
+            string output = RunProcess("/usr/bin/lsblk", $"-J -o NAME,MOUNTPOINT {devicePath}");
             using JsonDocument doc = JsonDocument.Parse(output);
             
             foreach (JsonElement blockDevice in doc.RootElement.GetProperty("blockdevices").EnumerateArray())
@@ -193,7 +193,7 @@ internal static partial class DiskService
                             string mountPoint = mp.GetString() ?? "";
                             if (!string.IsNullOrEmpty(mountPoint))
                             {
-                                try { RunProcess("umount", mountPoint); } catch { }
+                                try { RunProcess("/usr/bin/umount", mountPoint); } catch { }
                             }
                         }
                     }
