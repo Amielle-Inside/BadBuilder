@@ -3,27 +3,24 @@ using DiscUtils.Fat;
 using DiscUtils.Streams;
 using System.Diagnostics;
 using DiscUtils.Partitions;
+using System.Runtime.Versioning;
+using System.Text.Json;
 
 namespace BadBuilder.Services.Disks;
 
 internal static partial class DiskService
 {
-    internal static List<DiskInfo> EnumerateDisks() => InvokePlatformAction(EnumerateDisksWindows, null, null); // TODO: Implement for macOS and Linux
+    internal static List<DiskInfo> EnumerateDisks() => InvokePlatformAction(EnumerateDisksWindows, EnumerateDisksMacOS, EnumerateDisksLinux);
 
     internal static string FormatFAT32(DiskInfo disk)
     {
         ArgumentNullException.ThrowIfNull(disk);
 
-        using RawDiskStream stream = OpenRawDiskForWrite(disk);
-        using Disk virtualDisk     = new(stream, Ownership.None);
-
-        BiosPartitionTable.Initialize(virtualDisk, WellKnownPartitionType.WindowsFat);
-
-        using FatFileSystem fs = FatFileSystem.FormatPartition(virtualDisk, 0, "BADUPDATE  ");
-        stream.Flush();
-
-        return InvokePlatformAction(ReassignWindows, null, null, disk); // TODO: Implement for macOS and Linux
+        return InvokePlatformAction(FormatFAT32Windows, FormatFAT32MacOS, FormatFAT32Linux, disk);
     }
+
+
+    private static RawDiskStream OpenRawDiskForWrite(DiskInfo disk) => InvokePlatformAction(OpenRawDiskForWriteWindows, OpenRawDiskForWriteMacOS, OpenRawDiskForWriteLinux, disk);
 
 
     private static string RunProcess(string fileName, string arguments)
@@ -65,6 +62,13 @@ internal static partial class DiskService
 
         throw new PlatformNotSupportedException($"DiskService does not support this platform ({Environment.OSVersion.Platform}).");
     }
+
+
+    // macOS stubs (not implemented yet)
+    private static List<DiskInfo> EnumerateDisksMacOS() => throw new PlatformNotSupportedException("macOS disk enumeration not implemented yet.");
+    private static RawDiskStream OpenRawDiskForWriteMacOS(DiskInfo disk) => throw new PlatformNotSupportedException("macOS disk write not implemented yet.");
+    private static string FormatFAT32MacOS(DiskInfo disk) => throw new PlatformNotSupportedException("macOS FAT32 formatting not implemented yet.");
+    private static string ReassignMacOS(DiskInfo disk) => throw new PlatformNotSupportedException("macOS partition reassign not implemented yet.");
 
 
     private sealed class RawDiskStream(Stream inner, long length, Action? onDisposed = null) : Stream

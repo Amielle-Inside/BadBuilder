@@ -2,6 +2,10 @@
 using System.Runtime.Versioning;
 using Microsoft.Win32.SafeHandles;
 using System.Runtime.InteropServices;
+using DiscUtils.Raw;
+using DiscUtils.Fat;
+using DiscUtils.Partitions;
+using DiscUtils.Streams;
 
 namespace BadBuilder.Services.Disks;
 
@@ -42,7 +46,7 @@ internal static partial class DiskService
     }
 
     [SupportedOSPlatform("windows")]
-    private static RawDiskStream OpenRawDiskForWrite(DiskInfo disk)
+    private static RawDiskStream OpenRawDiskForWriteWindows(DiskInfo disk)
     {
         int diskIndex                = int.Parse(disk.ID);
         List<VolumeLock> volumeLocks = LockAndDismountVolumes(diskIndex);
@@ -197,5 +201,22 @@ internal static partial class DiskService
         }
 
         public void Dispose() => _handle.Dispose();
+    }
+
+
+    [SupportedOSPlatform("windows")]
+    private static string FormatFAT32Windows(DiskInfo disk)
+    {
+        ArgumentNullException.ThrowIfNull(disk);
+
+        using RawDiskStream stream = OpenRawDiskForWriteWindows(disk);
+        using Disk virtualDisk     = new(stream, Ownership.None);
+
+        BiosPartitionTable.Initialize(virtualDisk, WellKnownPartitionType.WindowsFat);
+
+        using FatFileSystem fs = FatFileSystem.FormatPartition(virtualDisk, 0, "BADUPDATE  ");
+        stream.Flush();
+
+        return ReassignWindows(disk);
     }
 }

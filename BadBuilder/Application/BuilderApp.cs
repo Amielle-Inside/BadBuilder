@@ -78,25 +78,18 @@ internal static partial class BuilderApp
                     throw new InvalidOperationException("The selected default homebrew has no valid entry point.");
             }
 
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            bool format = Controls.Confirm($"Are you sure you would like to format [bold]{Config.TargetDisk.Name}[/]? All data on this drive will be lost.", false, warning: true);
+            Controls.PadLine();
+
+            if (format)
             {
-                Controls.WriteWarning("Drive formatting is currently only supported on Windows. Please format the drive manually to FAT32 before proceeding.");
-                Controls.Pause("Press enter after you have formatted the drive.");
+                Controls.WriteInfo("Formatting drive.");
+                Config.MountPoint = DiskService.FormatFAT32(Config.TargetDisk);
+                Controls.WriteSuccess("Drive formatted.");
             }
             else
-            {
-                bool format = Controls.Confirm($"Are you sure you would like to format [bold]{Config.TargetDisk.Name}[/]? All data on this drive will be lost.", false, warning: true);
-                Controls.PadLine();
-
-                if (format)
-                {
-                    Controls.WriteInfo("Formatting drive.");
-                    Config.MountPoint = DiskService.FormatFAT32(Config.TargetDisk);
-                    Controls.WriteSuccess("Drive formatted.");
-                }
-                else
-                    return;
-            }
+                return;
+            
 
             if (Config.MountPoint is null) throw new Exception("Format did not remount the drive, installation cannot continue.");
 
