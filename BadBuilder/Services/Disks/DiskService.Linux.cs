@@ -147,36 +147,44 @@ internal static partial class DiskService
         Controls.WriteVerbose($"ReassignLinux: disk.DevicePath={disk.DevicePath}, disk.ID={disk.ID}");
         
         // Handle different partition naming schemes
-        // /dev/sdX -> /dev/sdX1
-        // /dev/nvmeXnY -> /dev/nvmeXnYp1
-        // /dev/mmcblkX -> /dev/mmcblkXp1
+        // /dev/sdX -> /dev/sdX1 (primary), /dev/sdXp1 (alternate)
+        // /dev/nvmeXnY -> /dev/nvmeXnYp1 (primary), /dev/nvmeXnY1 (alternate, rare)
+        // /dev/mmcblkX -> /dev/mmcblkXp1 (primary), /dev/mmcblkX1 (alternate)
         string partitionPath;
-        if (disk.DevicePath.StartsWith("/dev/nvme") || disk.DevicePath.StartsWith("/dev/mmcblk"))
+        string altPath;
+        
+        if (disk.DevicePath.StartsWith("/dev/nvme"))
         {
             partitionPath = $"{disk.DevicePath}p1";
+            altPath = $"{disk.DevicePath}1";
+        }
+        else if (disk.DevicePath.StartsWith("/dev/mmcblk"))
+        {
+            partitionPath = $"{disk.DevicePath}p1";
+            altPath = $"{disk.DevicePath}1";
         }
         else
         {
+            // /dev/sdX, /dev/hdX, etc.
             partitionPath = $"{disk.DevicePath}1";
+            altPath = $"{disk.DevicePath}p1";
         }
         
-        Controls.WriteVerbose($"Looking for partition at: {partitionPath}");
+        Controls.WriteVerbose($"Looking for partition at: {partitionPath} (alternate: {altPath})");
         
-        if (!File.Exists(partitionPath))
+        bool partitionFound = false;
+        if (File.Exists(partitionPath))
         {
-            // Try alternate naming
-            string altPath = partitionPath.EndsWith("p1") ? partitionPath[..^1] + "1" : partitionPath + "p1";
-            Controls.WriteVerbose($"Partition not found, trying alternate: {altPath}");
-            if (File.Exists(altPath))
-            {
-                partitionPath = altPath;
-            }
-            else
-            {
-                throw new IOException($"Formatted partition not found at {partitionPath} or {altPath}");
-            }
+            partitionFound = true;
+            Controls.WriteVerbose($"Found partition at primary path: {partitionPath}");
         }
-
+        else if (File.Exists(altPath))
+        {
+            partitionPath = altPath;
+            partitionFound = true;
+            Controls.WriteVerbose($"Found partition at alternate path: {partitionPath}");
+        }
+        
         // Trigger udev to assign mount point
         string udevadmPath = FindTool("udevadm", "/usr/sbin/udevadm", "/usr/bin/udevadm", "/bin/udevadm");
         string partprobePath = FindTool("partprobe", "/usr/sbin/partprobe", "/usr/bin/partprobe", "/bin/partprobe");
@@ -184,23 +192,35 @@ internal static partial class DiskService
         RunProcess(partprobePath, disk.DevicePath);
         Thread.Sleep(500);
 
-        // Find mount point
+        // Find mount point - check both disk and partition
         string lsblkPath = FindTool("lsblk", "/usr/bin/lsblk", "/bin/lsblk");
         string output = RunProcess(lsblkPath, $"-J -o NAME,MOUNTPOINT {disk.DevicePath}");
         using JsonDocument doc = JsonDocument.Parse(output);
         
         foreach (JsonElement blockDevice in doc.RootElement.GetProperty("blockdevices").EnumerateArray())
         {
+            // Check if the disk itself has a mountpoint (superfloppy / no partition table)
+            if (blockDevice.TryGetProperty("mountpoint", out var mp) && mp.ValueKind != JsonValueKind.Null)
+            {
+                string mountPoint = mp.GetString() ?? "";
+                if (!string.IsNullOrEmpty(mountPoint))
+                {
+                    Controls.WriteVerbose($"Found existing mount point on disk: {mountPoint}");
+                    return mountPoint + "/";
+                }
+            }
+            
+            // Check partitions
             if (blockDevice.TryGetProperty("children", out var children))
             {
                 foreach (JsonElement partition in children.EnumerateArray())
                 {
-                    if (partition.TryGetProperty("mountpoint", out var mp) && mp.ValueKind != JsonValueKind.Null)
+                    if (partition.TryGetProperty("mountpoint", out mp) && mp.ValueKind != JsonValueKind.Null)
                     {
                         string mountPoint = mp.GetString() ?? "";
                         if (!string.IsNullOrEmpty(mountPoint))
                         {
-                            Controls.WriteVerbose($"Found existing mount point: {mountPoint}");
+                            Controls.WriteVerbose($"Found existing mount point on partition: {mountPoint}");
                             return mountPoint + "/";
                         }
                     }
@@ -208,7 +228,28 @@ internal static partial class DiskService
             }
         }
 
-        // If not auto-mounted, try to mount manually
+        // If partition not found on disk, but we found a mountpoint on the disk itself, use the disk
+        if (!partitionFound)
+        {
+            Controls.WriteVerbose($"No partition found, checking if disk itself has filesystem (superfloppy)");
+            // Try to mount the disk directly
+            string manualMountPointDisk = $"/mnt/badbuilder_{disk.ID}_disk";
+            Directory.CreateDirectory(manualMountPointDisk);
+            
+            try
+            {
+                string mountPath = FindTool("mount", "/usr/bin/mount", "/bin/mount");
+                RunProcess(mountPath, $"{disk.DevicePath} {manualMountPointDisk}");
+                Controls.WriteVerbose($"Manually mounted disk directly at: {manualMountPointDisk}");
+                return manualMountPointDisk + "/";
+            }
+            catch (Exception ex)
+            {
+                throw new IOException($"Could not find or mount partition for {disk.DevicePath}. Partition paths checked: {partitionPath}, {altPath}. The drive may not be partitioned/formatted yet. Try 'Format as FAT32' option instead. Error: {ex.Message}");
+            }
+        }
+
+        // If partition found but not mounted, try to mount it
         string manualMountPoint = $"/mnt/badbuilder_{disk.ID}";
         Directory.CreateDirectory(manualMountPoint);
         
@@ -216,7 +257,7 @@ internal static partial class DiskService
         {
             string mountPath = FindTool("mount", "/usr/bin/mount", "/bin/mount");
             RunProcess(mountPath, $"{partitionPath} {manualMountPoint}");
-            Controls.WriteVerbose($"Manually mounted at: {manualMountPoint}");
+            Controls.WriteVerbose($"Manually mounted partition at: {manualMountPoint}");
             return manualMountPoint + "/";
         }
         catch (Exception ex)
