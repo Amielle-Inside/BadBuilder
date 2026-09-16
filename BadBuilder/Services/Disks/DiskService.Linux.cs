@@ -144,12 +144,38 @@ internal static partial class DiskService
     [SupportedOSPlatform("linux")]
     private static string ReassignLinux(DiskInfo disk)
     {
-        string partitionPath = $"{disk.DevicePath}1";
-        if (!File.Exists(partitionPath))
+        Controls.WriteVerbose($"ReassignLinux: disk.DevicePath={disk.DevicePath}, disk.ID={disk.ID}");
+        
+        // Handle different partition naming schemes
+        // /dev/sdX -> /dev/sdX1
+        // /dev/nvmeXnY -> /dev/nvmeXnYp1
+        // /dev/mmcblkX -> /dev/mmcblkXp1
+        string partitionPath;
+        if (disk.DevicePath.StartsWith("/dev/nvme") || disk.DevicePath.StartsWith("/dev/mmcblk"))
+        {
             partitionPath = $"{disk.DevicePath}p1";
-
+        }
+        else
+        {
+            partitionPath = $"{disk.DevicePath}1";
+        }
+        
+        Controls.WriteVerbose($"Looking for partition at: {partitionPath}");
+        
         if (!File.Exists(partitionPath))
-            throw new IOException($"Formatted partition not found at {partitionPath} or {disk.DevicePath}p1");
+        {
+            // Try alternate naming
+            string altPath = partitionPath.EndsWith("p1") ? partitionPath[..^1] + "1" : partitionPath + "p1";
+            Controls.WriteVerbose($"Partition not found, trying alternate: {altPath}");
+            if (File.Exists(altPath))
+            {
+                partitionPath = altPath;
+            }
+            else
+            {
+                throw new IOException($"Formatted partition not found at {partitionPath} or {altPath}");
+            }
+        }
 
         // Trigger udev to assign mount point
         string udevadmPath = FindTool("udevadm", "/usr/sbin/udevadm", "/usr/bin/udevadm", "/bin/udevadm");
@@ -173,7 +199,10 @@ internal static partial class DiskService
                     {
                         string mountPoint = mp.GetString() ?? "";
                         if (!string.IsNullOrEmpty(mountPoint))
+                        {
+                            Controls.WriteVerbose($"Found existing mount point: {mountPoint}");
                             return mountPoint + "/";
+                        }
                     }
                 }
             }
@@ -187,11 +216,12 @@ internal static partial class DiskService
         {
             string mountPath = FindTool("mount", "/usr/bin/mount", "/bin/mount");
             RunProcess(mountPath, $"{partitionPath} {manualMountPoint}");
+            Controls.WriteVerbose($"Manually mounted at: {manualMountPoint}");
             return manualMountPoint + "/";
         }
-        catch
+        catch (Exception ex)
         {
-            throw new IOException($"Could not find or mount partition for {disk.DevicePath}");
+            throw new IOException($"Could not find or mount partition for {disk.DevicePath}: {ex.Message}");
         }
     }
 
