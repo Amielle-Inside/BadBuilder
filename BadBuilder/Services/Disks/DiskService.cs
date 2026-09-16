@@ -20,18 +20,31 @@ internal static partial class DiskService
         return InvokePlatformAction(FormatFAT32Windows, FormatFAT32MacOS, FormatFAT32Linux, disk);
     }
 
+    internal static string Reassign(DiskInfo disk)
+    {
+        ArgumentNullException.ThrowIfNull(disk);
+
+        return InvokePlatformAction(ReassignWindows, ReassignMacOS, ReassignLinux, disk);
+    }
+
 
     private static RawDiskStream OpenRawDiskForWrite(DiskInfo disk) => InvokePlatformAction(OpenRawDiskForWriteWindows, OpenRawDiskForWriteMacOS, OpenRawDiskForWriteLinux, disk);
 
 
     private static string RunProcess(string fileName, string arguments)
     {
+        // Verify the executable exists before trying to run it
+        if (!File.Exists(fileName))
+        {
+            throw new IOException($"Tool not found: '{fileName}'. Please ensure required packages are installed (gdisk, parted, dosfstools, util-linux).");
+        }
+
         ProcessStartInfo psi = new(fileName, arguments)
         {
             RedirectStandardOutput = true,
             RedirectStandardError  = true,
             UseShellExecute        = false,
-            WorkingDirectory       = "/", // Use root to avoid issues with current working directory in self-contained builds
+            WorkingDirectory       = "/",
         };
 
         Controls.WriteVerbose($"Running: {fileName} {arguments}");
