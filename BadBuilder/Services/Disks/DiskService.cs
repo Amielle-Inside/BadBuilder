@@ -31,6 +31,7 @@ internal static partial class DiskService
             RedirectStandardOutput = true,
             RedirectStandardError  = true,
             UseShellExecute        = false,
+            WorkingDirectory       = "/", // Use root to avoid issues with current working directory in self-contained builds
         };
 
         Controls.WriteVerbose($"Running: {fileName} {arguments}");
