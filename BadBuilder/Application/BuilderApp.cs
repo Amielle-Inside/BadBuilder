@@ -9,9 +9,13 @@ namespace BadBuilder.Application;
 internal static partial class BuilderApp
 {
     private static readonly BuilderConfig Config = new(ArtifactCatalog.Homebrew);
+    private static bool Verbose { get; set; }
 
-    internal static async Task RunAsync(CancellationToken cancellationToken)
+    internal static async Task RunAsync(bool verbose, CancellationToken cancellationToken)
     {
+        Verbose = verbose;
+        Controls.SetVerbose(verbose);
+
         bool running = true;
         while (running && !cancellationToken.IsCancellationRequested)
         {
@@ -78,6 +82,8 @@ internal static partial class BuilderApp
                     throw new InvalidOperationException("The selected default homebrew has no valid entry point.");
             }
 
+            Controls.WriteVerbose($"Target disk: {Config.TargetDisk.DevicePath} ({Config.TargetDisk.Name}) size={Config.TargetDisk.Size} type={Config.TargetDisk.Type}");
+
             bool format = Controls.Confirm($"Are you sure you would like to format [bold]{Config.TargetDisk.Name}[/]? All data on this drive will be lost.", false, warning: true);
             Controls.PadLine();
 
@@ -86,6 +92,7 @@ internal static partial class BuilderApp
                 Controls.WriteInfo("Formatting drive.");
                 Config.MountPoint = DiskService.FormatFAT32(Config.TargetDisk);
                 Controls.WriteSuccess("Drive formatted.");
+                Controls.WriteVerbose($"Mount point: {Config.MountPoint}");
             }
             else
                 return;
@@ -97,6 +104,10 @@ internal static partial class BuilderApp
             string workRoot     = Path.Combine(AppContext.BaseDirectory, "Work");
             string downloadRoot = Path.Combine(workRoot, "Downloads");
             string stagingRoot  = Path.Combine(workRoot, "Staging");
+
+            Controls.WriteVerbose($"Work root: {workRoot}");
+            Controls.WriteVerbose($"Download root: {downloadRoot}");
+            Controls.WriteVerbose($"Staging root: {stagingRoot}");
 
             Directory.CreateDirectory(downloadRoot);
             Controls.PadLine();
@@ -145,6 +156,7 @@ internal static partial class BuilderApp
                     }
 
                     File.WriteAllLines(iniPath, lines);
+                    Controls.WriteVerbose($"Updated launch.ini: Default = {newDefaultPath}");
                 }
                 else
                 {
@@ -161,6 +173,8 @@ internal static partial class BuilderApp
         catch (Exception ex)
         {
             Controls.WriteError($"Install failed: {ex.Message}");
+            if (Verbose)
+                Controls.WriteVerbose($"Stack trace: {ex.StackTrace}");
             Controls.Pause();
         }
     }

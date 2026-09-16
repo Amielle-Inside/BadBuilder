@@ -1,10 +1,11 @@
 ﻿using DiscUtils.Raw;
 using DiscUtils.Fat;
 using DiscUtils.Streams;
-using System.Diagnostics;
 using DiscUtils.Partitions;
+using System.Diagnostics;
 using System.Runtime.Versioning;
 using System.Text.Json;
+using BadBuilder.UI;
 
 namespace BadBuilder.Services.Disks;
 
@@ -32,11 +33,18 @@ internal static partial class DiskService
             UseShellExecute        = false,
         };
 
+        Controls.WriteVerbose($"Running: {fileName} {arguments}");
+
         using Process process = Process.Start(psi) ?? throw new IOException($"Failed to start '{fileName}'.");
 
         string stdout = process.StandardOutput.ReadToEnd();
         string stderr = process.StandardError.ReadToEnd();
         process.WaitForExit();
+
+        if (!string.IsNullOrWhiteSpace(stdout))
+            Controls.WriteVerbose($"stdout: {stdout.Trim()}");
+        if (!string.IsNullOrWhiteSpace(stderr))
+            Controls.WriteVerbose($"stderr: {stderr.Trim()}");
 
         if (process.ExitCode != 0)
             throw new IOException($"'{fileName} {arguments}' failed ({process.ExitCode}): {stderr}");

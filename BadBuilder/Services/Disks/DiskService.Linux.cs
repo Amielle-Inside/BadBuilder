@@ -6,6 +6,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Text.Json;
+using BadBuilder.UI;
 
 namespace BadBuilder.Services.Disks;
 
@@ -14,11 +15,13 @@ internal static partial class DiskService
     [SupportedOSPlatform("linux")]
     private static List<DiskInfo> EnumerateDisksLinux()
     {
+        Controls.WriteVerbose("Enumerating disks on Linux...");
         List<DiskInfo> disks = [];
 
         try
         {
             string lsblkPath = FindTool("lsblk", "/usr/bin/lsblk", "/bin/lsblk");
+            Controls.WriteVerbose($"Using lsblk: {lsblkPath}");
             string output = RunProcess(lsblkPath, "-J -o NAME,SIZE,TYPE,TRAN,MODEL,VENDOR,MOUNTPOINT,RM");
             using JsonDocument doc = JsonDocument.Parse(output);
             
@@ -65,6 +68,8 @@ internal static partial class DiskService
                 if (!removable && tran.Equals("usb", StringComparison.OrdinalIgnoreCase))
                     removable = true;
 
+                Controls.WriteVerbose($"Found disk: {devicePath} ({name}) size={size} removable={removable} tran={tran} model={model}");
+
                 disks.Add(new DiskInfo(
                     ID: name,
                     Name: $"{vendor} {model}".Trim(),
@@ -79,6 +84,7 @@ internal static partial class DiskService
             throw new IOException($"Failed to enumerate disks on Linux: {ex.Message}", ex);
         }
 
+        Controls.WriteVerbose($"Total disks found: {disks.Count}");
         return disks;
     }
 
@@ -101,10 +107,12 @@ internal static partial class DiskService
     [SupportedOSPlatform("linux")]
     private static string FormatFAT32Linux(DiskInfo disk)
     {
+        Controls.WriteVerbose($"Formatting {disk.DevicePath} ({disk.Name}) as FAT32...");
         string devicePath = disk.DevicePath;
         
         // Wipe existing partition table and create new MBR with FAT32 partition
         string sgdiskPath = FindTool("sgdisk", "/usr/sbin/sgdisk", "/usr/bin/sgdisk", "/bin/sgdisk");
+        Controls.WriteVerbose($"Using sgdisk: {sgdiskPath}");
         RunProcess(sgdiskPath, $"--zap-all {devicePath}");
         RunProcess(sgdiskPath, $"-n 1:0:0 -t 1:0700 -c 1:BADUPDATE {devicePath}");
         
@@ -117,15 +125,19 @@ internal static partial class DiskService
             // Try alternate naming (e.g., /dev/sdb -> /dev/sdb1 vs /dev/nvme0n1 -> /dev/nvme0n1p1)
             partitionPath = $"{devicePath}p1";
         }
+        Controls.WriteVerbose($"Partition path: {partitionPath}");
 
         // Format as FAT32
         string mkfsFatPath = FindTool("mkfs.fat", "/usr/sbin/mkfs.fat", "/usr/bin/mkfs.fat", "/bin/mkfs.fat");
+        Controls.WriteVerbose($"Using mkfs.fat: {mkfsFatPath}");
         RunProcess(mkfsFatPath, $"-F 32 -n BADUPDATE {partitionPath}");
         
         // Sync
         string syncPath = FindTool("sync", "/usr/bin/sync", "/bin/sync");
+        Controls.WriteVerbose($"Using sync: {syncPath}");
         RunProcess(syncPath, "");
         
+        Controls.WriteVerbose($"FAT32 formatting complete: {partitionPath}");
         return partitionPath;
     }
 

@@ -13,8 +13,12 @@ internal static class AppTheme
 
 internal static class Controls
 {
+    private static bool Verbose { get; set; } = false;
+
     private static string Escape(string text) => Markup.Escape(text);
     private static string ToMarkupColor(Color? color) => color is null ? "white" : $"rgb({color.Value.R},{color.Value.G},{color.Value.B})";
+
+    internal static void SetVerbose(bool verbose) => Verbose = verbose;
 
 
     internal static void RenderHeader()
@@ -39,6 +43,12 @@ internal static class Controls
     }
 
     internal static void PadLine() => AnsiConsole.WriteLine();
+
+    internal static void WriteVerbose(string message)
+    {
+        if (Verbose)
+            AnsiConsole.MarkupLine($"[gray]{Escape("[debug]")}[/] {Escape(message)}");
+    }
 
     internal static void WriteInfo(string message)    => AnsiConsole.MarkupLine($"[yellow]{Escape("[*]")}[/] {message}");
     internal static void WriteWarning(string message) => AnsiConsole.MarkupLine($"[{ToMarkupColor(AppTheme.LightOrangeStyle.Foreground)}]{Escape("[!]")}[/] {message}");

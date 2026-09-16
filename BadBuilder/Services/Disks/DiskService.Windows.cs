@@ -6,6 +6,7 @@ using DiscUtils.Raw;
 using DiscUtils.Fat;
 using DiscUtils.Partitions;
 using DiscUtils.Streams;
+using BadBuilder.UI;
 
 namespace BadBuilder.Services.Disks;
 
@@ -14,6 +15,7 @@ internal static partial class DiskService
     [SupportedOSPlatform("windows")]
     private static List<DiskInfo> EnumerateDisksWindows()
     {
+        Controls.WriteVerbose("Enumerating disks on Windows...");
         List<DiskInfo> disks = [];
 
         using ManagementObjectSearcher searcher = new("SELECT * FROM Win32_DiskDrive");
@@ -31,6 +33,8 @@ internal static partial class DiskService
                 interfaceType.Equals("USB", StringComparison.OrdinalIgnoreCase) ||
                 mediaType.Contains("Removable", StringComparison.OrdinalIgnoreCase);
 
+            Controls.WriteVerbose($"Found disk: {deviceId} (index={index}) size={size} removable={removable} interface={interfaceType} media={mediaType} model={model}");
+
             disks.Add(
                 new DiskInfo(
                     ID: index.ToString(),
@@ -42,6 +46,7 @@ internal static partial class DiskService
             );
         }
 
+        Controls.WriteVerbose($"Total disks found: {disks.Count}");
         return disks;
     }
 
@@ -207,6 +212,7 @@ internal static partial class DiskService
     [SupportedOSPlatform("windows")]
     private static string FormatFAT32Windows(DiskInfo disk)
     {
+        Controls.WriteVerbose($"Formatting {disk.DevicePath} ({disk.Name}) as FAT32...");
         ArgumentNullException.ThrowIfNull(disk);
 
         using RawDiskStream stream = OpenRawDiskForWriteWindows(disk);
@@ -217,6 +223,7 @@ internal static partial class DiskService
         using FatFileSystem fs = FatFileSystem.FormatPartition(virtualDisk, 0, "BADUPDATE  ");
         stream.Flush();
 
+        Controls.WriteVerbose($"FAT32 formatting complete, reassigning drive letter...");
         return ReassignWindows(disk);
     }
 }
