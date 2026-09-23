@@ -34,13 +34,22 @@ internal static partial class DiskService
                 string devicePath = $"/dev/{name}";
                 
                 long size = 0;
-                string sizeStr = blockDevice.GetProperty("size").GetString() ?? "0";
-                if (long.TryParse(sizeStr, out long bytes))
-                    size = bytes;
-                else if (sizeStr.EndsWith("G"))
-                    size = (long)(double.Parse(sizeStr.TrimEnd('G')) * 1024 * 1024 * 1024);
-                else if (sizeStr.EndsWith("M"))
-                    size = (long)(double.Parse(sizeStr.TrimEnd('M')) * 1024 * 1024);
+                JsonElement sizeElement = blockDevice.GetProperty("size");
+                if (sizeElement.ValueKind == JsonValueKind.Number)
+                {
+                    // util-linux >= 2.36 emits size as a JSON number (bytes)
+                    size = sizeElement.GetInt64();
+                }
+                else
+                {
+                    string sizeStr = sizeElement.GetString() ?? "0";
+                    if (long.TryParse(sizeStr, out long bytes))
+                        size = bytes;
+                    else if (sizeStr.EndsWith("G"))
+                        size = (long)(double.Parse(sizeStr.TrimEnd('G')) * 1024 * 1024 * 1024);
+                    else if (sizeStr.EndsWith("M"))
+                        size = (long)(double.Parse(sizeStr.TrimEnd('M')) * 1024 * 1024);
+                }
 
                 string model = (blockDevice.TryGetProperty("model", out var m) && m.ValueKind != JsonValueKind.Null)
                     ? m.GetString()?.Trim() ?? $"Disk {name}"
@@ -110,49 +119,158 @@ internal static partial class DiskService
         Controls.WriteVerbose($"Formatting {disk.DevicePath} ({disk.Name}) as FAT32...");
         string devicePath = disk.DevicePath;
         
-        // Wipe existing partition table and create new MBR with FAT32 partition
-        string sgdiskPath = FindTool("sgdisk", "/usr/sbin/sgdisk", "/usr/bin/sgdisk", "/bin/sgdisk");
-        Controls.WriteVerbose($"Using sgdisk: {sgdiskPath}");
-        RunProcess(sgdiskPath, $"--zap-all {devicePath}");
-        RunProcess(sgdiskPath, $"-n 1:0:0 -t 1:0700 -c 1:BADUPDATE {devicePath}");
+        // Unmount any existing partitions first
+        UnmountPartitions(devicePath);
+        
+        // Find required tools
+        string partedPath = FindTool("parted", "/usr/sbin/parted", "/usr/bin/parted", "/bin/parted");
+        string mkfsVfatPath = FindTool("mkfs.vfat", "/usr/sbin/mkfs.vfat", "/usr/bin/mkfs.vfat", "/bin/mkfs.vfat", 
+                                       "/usr/sbin/mkfs.fat", "/usr/bin/mkfs.fat", "/bin/mkfs.fat");
+        string syncPath = FindTool("sync", "/usr/bin/sync", "/bin/sync");
+        string partprobePath = FindTool("partprobe", "/usr/sbin/partprobe", "/usr/bin/partprobe", "/bin/partprobe");
+        string udevadmPath = FindTool("udevadm", "/usr/sbin/udevadm", "/usr/bin/udevadm", "/bin/udevadm");
+        string umountPath = FindTool("umount", "/usr/bin/umount", "/bin/umount");
+        
+        Controls.WriteVerbose($"Using parted: {partedPath}");
+        Controls.WriteVerbose($"Using mkfs.vfat: {mkfsVfatPath}");
+        
+        // Create MBR partition table (matches Windows behavior; Xbox 360 expects MBR, not GPT)
+        RunProcess(partedPath, $"--script {devicePath} mklabel msdos");
+        
+        // Create single primary FAT32 partition spanning entire disk ("primary" is required for MBR)
+        RunProcess(partedPath, $"--script {devicePath} mkpart primary fat32 1MiB 100%");
+        
+        // Set LBA flag -> partition type 0x0C (W95 FAT32 LBA), which the Xbox 360 expects
+        RunProcess(partedPath, $"--script {devicePath} set 1 lba on");
         
         // Wait for kernel to register new partition
         Thread.Sleep(1000);
+        RunProcess(partprobePath, devicePath);
+        RunProcess(udevadmPath, "settle");
+        Thread.Sleep(500);
         
-        string partitionPath = $"{devicePath}1";
+        // Determine partition path (handle different naming schemes)
+        string partitionPath;
+        string altPath;
+        
+        if (devicePath.StartsWith("/dev/nvme"))
+        {
+            partitionPath = $"{devicePath}p1";
+            altPath = $"{devicePath}1";
+        }
+        else if (devicePath.StartsWith("/dev/mmcblk"))
+        {
+            partitionPath = $"{devicePath}p1";
+            altPath = $"{devicePath}1";
+        }
+        else
+        {
+            // /dev/sdX, /dev/hdX, etc.
+            partitionPath = $"{devicePath}1";
+            altPath = $"{devicePath}p1";
+        }
+        
+        Controls.WriteVerbose($"Looking for partition at: {partitionPath} (alternate: {altPath})");
+        
         if (!File.Exists(partitionPath))
         {
-            // Try alternate naming (e.g., /dev/sdb -> /dev/sdb1 vs /dev/nvme0n1 -> /dev/nvme0n1p1)
-            partitionPath = $"{devicePath}p1";
+            Controls.WriteVerbose($"Partition not found at primary, trying alternate: {altPath}");
+            if (File.Exists(altPath))
+            {
+                partitionPath = altPath;
+                Controls.WriteVerbose($"Found partition at alternate path: {partitionPath}");
+            }
+            else
+            {
+                throw new IOException($"Partition not found after creation at {partitionPath} or {altPath}. parted may have failed.");
+            }
         }
         Controls.WriteVerbose($"Partition path: {partitionPath}");
-
+        
+        // Unmount partition if auto-mounted after partprobe
+        Controls.WriteVerbose($"Checking if partition is mounted...");
+        string lsblkPath = FindTool("lsblk", "/usr/bin/lsblk", "/bin/lsblk");
+        string output = RunProcess(lsblkPath, $"-J -o NAME,MOUNTPOINT {partitionPath}");
+        using JsonDocument doc = JsonDocument.Parse(output);
+        
+        foreach (JsonElement blockDevice in doc.RootElement.GetProperty("blockdevices").EnumerateArray())
+        {
+            if (blockDevice.TryGetProperty("mountpoint", out var mp) && mp.ValueKind != JsonValueKind.Null)
+            {
+                string mountPoint = mp.GetString() ?? "";
+                if (!string.IsNullOrEmpty(mountPoint))
+                {
+                    Controls.WriteVerbose($"Unmounting partition: {mountPoint}");
+                    try { RunProcess(umountPath, mountPoint); } catch { }
+                }
+            }
+        }
+        
         // Format as FAT32
-        string mkfsFatPath = FindTool("mkfs.fat", "/usr/sbin/mkfs.fat", "/usr/bin/mkfs.fat", "/bin/mkfs.fat");
-        Controls.WriteVerbose($"Using mkfs.fat: {mkfsFatPath}");
-        RunProcess(mkfsFatPath, $"-F 32 -n BADUPDATE {partitionPath}");
+        Controls.WriteVerbose($"Formatting partition as FAT32...");
+        RunProcess(mkfsVfatPath, $"-F 32 -n BADUPDATE {partitionPath}");
         
         // Sync
-        string syncPath = FindTool("sync", "/usr/bin/sync", "/bin/sync");
-        Controls.WriteVerbose($"Using sync: {syncPath}");
         RunProcess(syncPath, "");
         
         Controls.WriteVerbose($"FAT32 formatting complete: {partitionPath}");
-        return partitionPath;
+
+        // Mount the freshly formatted partition so the caller gets a usable filesystem path.
+        // Return the partition device node would make the install write into /dev/sdc1 directly.
+        return MountPartition(disk, partitionPath);
+    }
+
+    [SupportedOSPlatform("linux")]
+    private static string MountPartition(DiskInfo disk, string partitionPath)
+    {
+        string udevadmPath = FindTool("udevadm", "/usr/sbin/udevadm", "/usr/bin/udevadm", "/bin/udevadm");
+        string lsblkPath   = FindTool("lsblk", "/usr/bin/lsblk", "/bin/lsblk");
+        string mountPath   = FindTool("mount", "/usr/bin/mount", "/bin/mount");
+
+        // Give the desktop automounter a moment to mount the new filesystem (udisks races with mkfs)
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            RunProcess(udevadmPath, "settle");
+            Thread.Sleep(500);
+
+            string output = RunProcess(lsblkPath, $"-J -o NAME,MOUNTPOINT {partitionPath}");
+            using JsonDocument doc = JsonDocument.Parse(output);
+
+            foreach (JsonElement blockDevice in doc.RootElement.GetProperty("blockdevices").EnumerateArray())
+            {
+                if (blockDevice.TryGetProperty("mountpoint", out var mp) &&
+                    mp.ValueKind == JsonValueKind.String &&
+                    !string.IsNullOrEmpty(mp.GetString()))
+                {
+                    string mountPoint = mp.GetString()!;
+                    Controls.WriteVerbose($"Partition auto-mounted at: {mountPoint}");
+                    return mountPoint + "/";
+                }
+            }
+
+            Controls.WriteVerbose($"Waiting for automount (attempt {attempt + 1}/5)...");
+        }
+
+        // Desktop automounter did not pick it up: mount manually
+        string manualMountPoint = $"/mnt/badbuilder_{disk.ID}";
+        Directory.CreateDirectory(manualMountPoint);
+        RunProcess(mountPath, $"{partitionPath} {manualMountPoint}");
+        Controls.WriteVerbose($"Manually mounted partition at: {manualMountPoint}");
+        return manualMountPoint + "/";
     }
 
     [SupportedOSPlatform("linux")]
     private static string ReassignLinux(DiskInfo disk)
     {
         Controls.WriteVerbose($"ReassignLinux: disk.DevicePath={disk.DevicePath}, disk.ID={disk.ID}");
-        
+
         // Handle different partition naming schemes
         // /dev/sdX -> /dev/sdX1 (primary), /dev/sdXp1 (alternate)
         // /dev/nvmeXnY -> /dev/nvmeXnYp1 (primary), /dev/nvmeXnY1 (alternate, rare)
         // /dev/mmcblkX -> /dev/mmcblkXp1 (primary), /dev/mmcblkX1 (alternate)
         string partitionPath;
         string altPath;
-        
+
         if (disk.DevicePath.StartsWith("/dev/nvme"))
         {
             partitionPath = $"{disk.DevicePath}p1";
@@ -169,9 +287,9 @@ internal static partial class DiskService
             partitionPath = $"{disk.DevicePath}1";
             altPath = $"{disk.DevicePath}p1";
         }
-        
+
         Controls.WriteVerbose($"Looking for partition at: {partitionPath} (alternate: {altPath})");
-        
+
         bool partitionFound = false;
         if (File.Exists(partitionPath))
         {
@@ -184,7 +302,7 @@ internal static partial class DiskService
             partitionFound = true;
             Controls.WriteVerbose($"Found partition at alternate path: {partitionPath}");
         }
-        
+
         // Trigger udev to assign mount point
         string udevadmPath = FindTool("udevadm", "/usr/sbin/udevadm", "/usr/bin/udevadm", "/bin/udevadm");
         string partprobePath = FindTool("partprobe", "/usr/sbin/partprobe", "/usr/bin/partprobe", "/bin/partprobe");
@@ -196,7 +314,7 @@ internal static partial class DiskService
         string lsblkPath = FindTool("lsblk", "/usr/bin/lsblk", "/bin/lsblk");
         string output = RunProcess(lsblkPath, $"-J -o NAME,MOUNTPOINT {disk.DevicePath}");
         using JsonDocument doc = JsonDocument.Parse(output);
-        
+
         foreach (JsonElement blockDevice in doc.RootElement.GetProperty("blockdevices").EnumerateArray())
         {
             // Check if the disk itself has a mountpoint (superfloppy / no partition table)
@@ -209,7 +327,7 @@ internal static partial class DiskService
                     return mountPoint + "/";
                 }
             }
-            
+
             // Check partitions
             if (blockDevice.TryGetProperty("children", out var children))
             {
@@ -235,7 +353,7 @@ internal static partial class DiskService
             // Try to mount the disk directly
             string manualMountPointDisk = $"/mnt/badbuilder_{disk.ID}_disk";
             Directory.CreateDirectory(manualMountPointDisk);
-            
+
             try
             {
                 string mountPath = FindTool("mount", "/usr/bin/mount", "/bin/mount");
@@ -252,7 +370,7 @@ internal static partial class DiskService
         // If partition found but not mounted, try to mount it
         string manualMountPoint = $"/mnt/badbuilder_{disk.ID}";
         Directory.CreateDirectory(manualMountPoint);
-        
+
         try
         {
             string mountPath = FindTool("mount", "/usr/bin/mount", "/bin/mount");
@@ -273,14 +391,27 @@ internal static partial class DiskService
             string lsblkPath = FindTool("lsblk", "/usr/bin/lsblk", "/bin/lsblk");
             string output = RunProcess(lsblkPath, $"-J -o NAME,MOUNTPOINT {devicePath}");
             using JsonDocument doc = JsonDocument.Parse(output);
-            
+
             foreach (JsonElement blockDevice in doc.RootElement.GetProperty("blockdevices").EnumerateArray())
             {
+                // Check if the disk itself has a mountpoint (superfloppy / no partition table)
+                if (blockDevice.TryGetProperty("mountpoint", out var mp) && mp.ValueKind != JsonValueKind.Null)
+                {
+                    string mountPoint = mp.GetString() ?? "";
+                    if (!string.IsNullOrEmpty(mountPoint))
+                    {
+                        Controls.WriteVerbose($"Unmounting disk (superfloppy): {mountPoint}");
+                        string umountPath = FindTool("umount", "/usr/bin/umount", "/bin/umount");
+                        try { RunProcess(umountPath, mountPoint); } catch { }
+                    }
+                }
+
+                // Check partitions
                 if (blockDevice.TryGetProperty("children", out var children))
                 {
                     foreach (JsonElement partition in children.EnumerateArray())
                     {
-                        if (partition.TryGetProperty("mountpoint", out var mp) && mp.ValueKind != JsonValueKind.Null)
+                        if (partition.TryGetProperty("mountpoint", out mp) && mp.ValueKind != JsonValueKind.Null)
                         {
                             string mountPoint = mp.GetString() ?? "";
                             if (!string.IsNullOrEmpty(mountPoint))
@@ -297,26 +428,39 @@ internal static partial class DiskService
     }
 
     private static string FindTool(string toolName, params string[] paths)
-    {
-        foreach (string path in paths)
         {
-            if (File.Exists(path))
-                return path;
-        }
+            Controls.WriteVerbose($"FindTool: looking for {toolName}");
         
-        // Fallback to PATH lookup
-        string? pathEnv = Environment.GetEnvironmentVariable("PATH");
-        if (!string.IsNullOrEmpty(pathEnv))
-        {
-            foreach (string dir in pathEnv.Split(':'))
+            // First check explicit paths
+            foreach (string path in paths)
             {
-                string fullPath = Path.Combine(dir, toolName);
-                if (File.Exists(fullPath))
-                    return fullPath;
+                Controls.WriteVerbose($"FindTool: checking {path}");
+                if (File.Exists(path))
+                {
+                    Controls.WriteVerbose($"FindTool: found at {path}");
+                    return path;
+                }
             }
-        }
         
-        // Last resort: return first path and let the error happen naturally
-        return paths[0];
-    }
+            // Fallback to PATH lookup
+            string? pathEnv = Environment.GetEnvironmentVariable("PATH");
+            if (!string.IsNullOrEmpty(pathEnv))
+            {
+                Controls.WriteVerbose($"FindTool: searching PATH: {pathEnv}");
+                foreach (string dir in pathEnv.Split(':'))
+                {
+                    string fullPath = Path.Combine(dir, toolName);
+                    Controls.WriteVerbose($"FindTool: checking {fullPath}");
+                    if (File.Exists(fullPath))
+                    {
+                        Controls.WriteVerbose($"FindTool: found at {fullPath}");
+                        return fullPath;
+                    }
+                }
+            }
+        
+            // Last resort: return first path and let the error happen naturally
+            Controls.WriteVerbose($"FindTool: NOT FOUND, returning first path: {paths[0]}");
+            return paths[0];
+        }
 }
