@@ -5,6 +5,14 @@
 
 # User-specific files
 *.rsuser
+# BadBuilder: build artifacts and test outputs
+BadBuilder-linux-x64.tar.gz
+BadBuilder-win-x64.zip
+BadBuilder/publish-linux/
+BadBuilder/publish-win/
+BadBuilder/test-harness/
+test-harness/
+BadBuilder/Work/
 *.suo
 *.user
 *.userosscache
